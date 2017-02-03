@@ -1,0 +1,367 @@
+---
+title: "Що всередині вашої Google location history?"
+output: html_notebook
+---
+
+
+  Як відомо,  Google зберігає наше розташування, якщо ми це дозволили в настройках смартфону (принаймні хочу сподіватись, що це робиться тільки з нашого дозволу). Цікаво було б подивитися на те, які ж дані в якому форматі там зберігаються, а також як їх можливо використати. Щоб дізнатися ми можемо отримати історію своїх переміщень, якщо зайдемо в свій Google-account за посиланням https://takeout.google.com/settings/takeout та оберемо тільки пункт "Карти(ваші місця)":
+  
+
+
+![](img/export1.jpg)
+
+
+  
+
+![Потім шукаємо внизу кнопку "Далі", натискаємо її](img/export2.png)
+
+
+
+![І наостанку обираємо формат архіву **"zip"**, розміри архіву та спосіб доставки. Потім натискаємо **"Створити архів"**](img/export3.png)
+
+
+  Google  збереже дані у вигляді файла з розширенням **".json"**. Це один із форматів зберігання даних, на кшалт файлів csv чи xls. Його можна також конвертувати **json**  в **csv** чи **xls** і далі працювати з даними наприклад у програмі Excel.
+
+  Я буду працювати з цими даними за допомогою мови програмування R, оскільки вона має більше можливостей для аналізу. Ви можете повторити ці розрахунки для себе, використовуючи наведений нижче код. 
+
+  Отже почнемо. 
+
+## Загальна статистика
+
+  Спочатку прочитаємо дані. Це можна зробити за допомогою бібліотеки **jsonlite**
+
+```{r}
+library(jsonlite)
+require(plyr)
+
+system.time(x <- fromJSON("MyHistory2016.json"))
+# extracting the locations dataframe
+loc <- x$locations
+
+```
+
+  Файл зчитано, це зайняло майже 5 хвилин у мене. Давайте подивимось, які дані ми маємо в архіві:
+
+```{r}
+head(loc)
+#get column names
+names(loc)
+```
+
+  Це таблиця з 8 колонок:
+
+* timestampMs - дані щодо дати/часу у форматі POSIX, які ми потім конвертуємо у звичний формат;
+
+* latitudeE7,longitudeE7 - координати місцезнаходження у форматі Е7, які ми також зможемо перевести у GPS-координати;
+
+* accuracy - точність, містить помилку розташування біля точки у GPS-координатах (вимірюється у метрах);
+
+* activitys - дані щодо діяльності в вказаний момент часу (детальніше трохи згодом);
+
+* velocity, heading, altitude - швидкість (м/с), напрям, висота (метрів) над рівнем моря  
+
+
+
+  Далі конвертуємо дані часу, координат, додаємо дані про точність
+```{r}
+
+ldf <- data.frame(t=rep(0,nrow(loc)))
+
+# converting time column from posix milliseconds into a readable time scale
+ldf$time <- as.POSIXct(as.numeric(x$locations$timestampMs)/1000, origin = "1970-01-01")
+ldf$date <- as.Date(ldf$time, format = "%Y-%m-%d")
+
+# converting longitude and latitude from E7 to GPS coordinates
+ldf$lat <- loc$latitudeE7 / 1e7
+ldf$lon <- loc$longitudeE7 / 1e7
+ldf$accuracy <- loc$accuracy
+ldf$t<-NULL
+```
+
+
+  Ось так виглядають наші дані тепер:
+```{r}
+
+head(ldf)
+
+```
+  Тепер колонки часу та координат набули звичного для нас вигляду. Саме час розібратися із змістом самої таблиці.
+
+
+  Переформуємо дані щодо переміщень (**activitys**)
+```{r}
+# get the most likely activity type and confidence for each time point.
+act <- laply(loc$activitys, function(f) {
+  if(is.null(f[[1]])) data.frame(activity=NA,confidence=NA,stringsAsFactors=F) else data.frame(activity=f[[2]][[1]][[1]][1],confidence=f[[2]][[1]][[2]][1],stringsAsFactors=F)
+},.progress="none")
+
+# combine activity data with the main dataset
+ldf$activity <- as.character(act[,1])
+ldf$confidence <- as.numeric(act[,2])
+
+```
+**activitys** може бути наступних видів:
+```{r}
+a<-count(ldf$activity)
+a<-a[order(-a$freq),]
+a
+```
+
+
+  Надалі спробуємо отримати з цих ознак щось путнє.
+
+
+  Додаємо дані про швидкість, висоту та напрям руху
+```{r}
+#
+ldf$velocity <- loc$velocity*3.6;# m/s -> km/h
+ldf$heading <- loc$heading
+ldf$altitude <-loc$altitude
+
+```
+
+  Все, більше інофрмаціх в Google location history немає, тому збережемо отриманий результат на диск та звільнимо оперативну память 
+```{r}
+#save ready data
+saveRDS(ldf, "./loc_data.rds")
+rm(list=ls())
+```
+
+
+
+
+
+##Запитання та відповіді
+
+  Для зручності давайте розіб'ємо дані по роках.
+
+```{r}
+ldf<-readRDS("./loc_data.rds")
+df2013<-subset(ldf,date >= as.Date("2013-01-01") & date <= as.Date("2013-12-31"))
+df2014<-subset(ldf,date >= as.Date("2014-01-01") & date <= as.Date("2014-12-31"))
+df2015<-subset(ldf,date >= as.Date("2015-01-01") & date <= as.Date("2015-12-31"))
+df2016<-subset(ldf,date >= as.Date("2016-01-01") & date <= as.Date("2016-12-31"))
+```
+
+###З якого моменту Google слідкував за мною?
+
+```{r}
+min(ldf$time)
+```
+
+  **Отже з 22 грудня 2012 року :)**
+
+###З якою частотою це відбувалось?
+
+  Подивимось загальну статистику даних:
+
+* кількість записів
+```{r}
+
+nrow(ldf)
+
+```
+
+* час початку та кінцевий відслідковування 
+(слід зауважити, що архів я отримав станом на вечір 21 грудня 2016 року, щоб мати повну статистику ще й за 2016 рік)
+```{r}
+min(ldf$time)
+max(ldf$time)
+```
+  Всього архів містить 1 527 827 зафіксованих місцезнаходжень з 22-12-2012 до 31-12-2016.
+
+```{r}
+points_p_day <- data.frame(table(ldf$date), group = "day")
+summary(points_p_day)
+
+```
+  __Це 1118 днів, протягом яких частота (Freq) замірів коливалась від 1 до  5928 раз на добу. В середньому це склало 1367 раз на добу, 56,91 раз на годину, або майже 1 раз на хвилину.__
+
+    _* Оскільки між цими двома датами мало би бути 1470 днів, то відповідно інформація про 352 днів була видалена або я забороняв збір даних щодо місцезнаходження. Нічого дивного, бо на той час я ще не сподівався, що буду вивчати своє місцезнаходження за декілька років._
+
+  Насправді, інтервал оновлення визначається рівнем заряду батареї, від того рухаєтесь Ви чи ні, як швидко рухаєтесь та деяких інших факторів.
+  
+
+
+### Де я був наприклад в 2014 році?
+
+```{r}
+
+require('ggplot2')
+require('ggmap')
+
+
+df<-df2014
+
+# compute the bounding box
+ldf_bbox <- make_bbox(lat = df$lat, lon = df$lon,f=0.7)
+
+ldf_big  <- get_map(location = ldf_bbox, source='google',maptype = "roadmap", zoom = 5)
+ggmap(ldf_big ) + 
+  geom_point(data = df, mapping =aes(x = lon, y = lat, color="color"), color = "red") 
+
+```
+  **Червоні позначки на карті показують всі мої координати протягом року. Як видно , в 2014 році я подорожував по Україні та був на острові Крит у Греції.**
+
+###Де я бував у Києві?
+
+  Давайте глянемо на мої місцерозташування у більшому масштабі. Спершу Київ.
+```{r}
+l<-geocode('Ukraine, Kyiv')
+region<-get_googlemap(center = c(l$lon,l$lat), color = "color",size = c(640,640),scale = 2,zoom = 11)
+
+ggmap(region, extent="device") + 
+  geom_point(data = df, aes(x = lon, y = lat,color = "color"), alpha = 0.5)
+
+```
+  Добре видно, що більшість моїх місцеперебувань знаходилися на правому березі Дніпра, на  лівому фактично лише окремі точки. Щоб отримати більш виразну картину, давайте змінимо колір точки перебування в залежності від швидкості, таким чином буде видно чи я просто проїзджав місцевість чи, можливо, знаходився там більш довгий час.
+
+```{r}
+df<-df[which(!is.na(df$velocity)), ]
+
+ggmap(region, extent="device") + 
+  geom_point(data = df, aes(x = lon, y = lat, color=velocity), alpha = 0.5)+
+  theme(legend.position = "right") + 
+  labs(x = "Longitude", y = "Latitude", 
+       title = "Location history data points in Kyiv",
+       subtitle = "Color scale shows velocity measured for location"
+       ) +
+  scale_colour_gradient(low ="blue", high = "red", guide = guide_legend(title = "Velocity, km/h"))
+```
+
+  **Точки з синім кольором показують місця, де я на протязі року знаходився найдовше на місці. Це дім, робота etc.**
+
+###Де я бував у Львові?
+```{r}
+df<-df2014
+l<-geocode('Ukraine, Lviv')
+region<-get_googlemap(center = c(l$lon,l$lat), color = "color",size = c(640,640),scale = 2,zoom = 11)
+
+ggmap(region,extent="device") + geom_point(data = df, aes(x = lon, y = lat, color=velocity), alpha = 0.5, color = "red")
+    
+```
+
+
+###Де я бував у Греції?
+```{r}
+
+l<-geocode('Greece, Crete')
+region<-get_googlemap(center = c(l$lon,l$lat), color = "color",size = c(640,640),scale = 2,zoom = 8)
+
+
+ggmap(region,extent="device") + geom_point(data = df, aes(x = lon, y = lat), alpha = 0.5, color = "red")+
+  theme(legend.position = "right") +
+  labs(
+    x = " ",
+    y = " ",
+    title = "Location history data points in Greece 2014")
+```
+
+
+
+###Що показує "activitys"" ?
+
+  Google визначає для кожної пари координат яким чином пересувався об1єкт і якщо активність позначити кольором, так само як я зробив для швидкості, то можно побачити на карті найбільш частий для точки тип активністі.
+```{r}
+df<-df2014
+df$activity[df$activity=="NA"]= NA
+df<-df[which(!is.na(df$activity)), ]
+
+df$activtype<-as.factor(df$activity)
+a<-count(df$activity)
+a<-a[order(-a$freq),]
+a
+
+```
+
+* still - об'єкт знаходився на місці
+
+* tilting - об'єкт повертає
+
+* inVehicle - об'єкт рухається в транспорті
+
+* unknown  - невідомий вид активності
+
+* onFoot - об'єкт йде пішки
+
+* onBicycle  - об'єкт рухається на велосипеді
+
+* exitingVehicle - об'єкт залишає траспортний засіб
+```{r}
+
+l<-geocode('Ukraine, Kyiv')
+region<-get_googlemap(center = c(l$lon,l$lat), color = "color",size = c(640,640),scale = 2,zoom = 11)
+
+colors <- colorRampPalette(c("blue", "yellow", "red"))(length(levels(df$activtype)))
+colors
+ggmap(region, extent="device") + 
+  geom_point(data = df, aes(x = lon, y = lat, color=df$activtype), alpha = 0.5)+
+  theme(legend.position = "right") + 
+  labs(x = "Longitude", y = "Latitude", 
+       title = "Location history data points in Kyiv",
+       subtitle = "Color scale shows velocity measured for location"
+       ) +
+   scale_fill_manual(values=setNames(colors, levels(df$activtype)))
+```
+
+  Наостанку зробимо частотний розподіл активності за 2014 рік. 
+```{r}
+
+ggplot(df, aes(x = df$activity, group = activity, fill = activtype)) + 
+  geom_bar()  + 
+  guides(fill = FALSE) +
+   labs(
+    x = "",
+    y = "Count",
+    title = "Main activities in 2016",
+    caption = "Associated activity for recorded positions in 2016. 
+    Because Google records activity probabilities for each position, 
+    only the activity with highest likelihood were chosen for each position."
+  )
+```
+**Як видно з діаграми, більшість часу я не переміщувався, а коли вже це робив, то пересувався на авто**
+До речі, на велосипеді я не пересувався зовсім, це скорше інформація з транспортних корків, в які я попадав.
+
+##Які висновки
+  
+  Що знає про наше місцерозташування Google?
+  
+  __* Координати у часі та просторі з періодом в середньому один раз на хвилину, а також тип переміщення (активності) для конкретної точки.__
+  
+  Що стосується точності для координат - вона залежить від того, у який спосіб визначалось місцерозташування. Існує два провайдера координат: GPS и Network.
+
+  GPS – це дані із GPS-супутників.
+
+  Network – це координати, які можна отримати через мобільну мережу чи WiFi. 
+  Орієнтовно, цифри похибки приблизно такі:
+  
+  * gps ~ 15 м
+  
+  * WiFi - залежить від розташування точок WiFi, за умови їх наявності ~ 20-30 м. 
+  
+  * Мобільний зв'язок залежить від розташування GSM-станцій, орієнтовна цифра похибки ~1500 м
+ 
+  __* Швидкість переміщення, висоту над рівнем моря та напрямок руху. __
+ 
+  *Більшу частину інформації з цієї нотатки щодо власної історії місцезнаходжень можна подивитись за посиланням https://www.google.com/maps/timeline без використання вказаних тут розрахунків.*
+  
+  Стосовно себе я вважаю, що функція Google location history скорше корисна, аніж шкідлива. Я із задоволенням пригадав, де мені прийшлось побувати за останні кілька років. Також хочу сказати, що пошкодував, що в мене немає частини моєї історії місцезнаходження і в майбутньому не планую виключати цю опцію в телефоні.
+  
+  Проте, якщо подібна інформація попаде до сторонніх осіб, вони отримають чи вирахують:
+  
+  * місце проживання, тобто де Ви у більшості часу знаходились вночі
+  * місце роботи чи перебуванння вдень, інші популярні місця, наприклад де Ви буваєте по вихідним
+  * швидкість пересування 
+  * відділення банків, магазинів і т.п., в яких Ви зазвичай буваєте
+  
+  
+  Доповнивши дані інформацією з інших джерел по людині можливо взнати практично все. Але це вже зовсім інша історія про дані. Залишається сподіватися, що Google location history може попасти до чужих рук тільки якщо Ваш акаунт зламають. А щоб цього не відбулось - регулярно міняйте паролі та увімкніть двохфакторну аутентифікацію.
+  
+
+###При написанні було використано наступні матеріали:
+
+1. [How to map your Google location history with R](https://www.r-bloggers.com/how-to-map-your-google-location-history-with-r/).
+
+2. [Visualizing My Location History with Python, Shapely, and Basemap](http://beneathdata.com/how-to/visualizing-my-location-history/)
+
+3. [My Google Location Data](https://rstudio-pubs-static.s3.amazonaws.com/60451_b3ba24cd0e854af491cb7e6816164a69.html)
